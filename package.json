@@ -18,5 +18,13 @@
     "express": "^4.16.4",
     "request": "^2.88.0",
     "uuid": "^3.3.2"
+  },
+  "engines": {
+      "name": "myapp",
+      "description": "a really cool app",
+      "version": "1.0.0",
+      "engines": {
+        "node": "12.13.0"
+      }
   }
 }
