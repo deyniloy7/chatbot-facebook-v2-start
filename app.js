@@ -6,8 +6,13 @@ const express = require("express");
 const crypto = require("crypto");
 const bodyParser = require("body-parser");
 const request = require("request");
+const pg = require("pg");
 const app = express();
 const uuid = require("uuid");
+const userService = require("./user");
+const colors = require('./colors');
+
+pg.defaults.ssl = true;
 
 // Messenger API parameters
 if (!config.FB_PAGE_TOKEN) {
@@ -69,6 +74,7 @@ const sessionClient = new dialogflow.SessionsClient({
 });
 
 const sessionIds = new Map();
+const usersMap = new Map();
 
 // Index route
 app.get("/", function(req, res) {
@@ -137,15 +143,25 @@ app.post("/webhook/", function(req, res) {
   }
 });
 
+function setSessionAndUser(senderID) {
+  if (!sessionIds.has(senderID)) {
+    sessionIds.set(senderID, uuid.v1());
+  }
+
+  if (!usersMap.has(senderID)) {
+    userService.addUser(function(user) {
+      usersMap.set(senderID, user);
+    }, senderID);
+  }
+}
+
 function receivedMessage(event) {
   var senderID = event.sender.id;
   var recipientID = event.recipient.id;
   var timeOfMessage = event.timestamp;
   var message = event.message;
 
-  if (!sessionIds.has(senderID)) {
-    sessionIds.set(senderID, uuid.v1());
-  }
+  setSessionAndUser(senderID);
   //console.log("Received message for user %d and page %d at %d with message:", senderID, recipientID, timeOfMessage);
   //console.log(JSON.stringify(message));
 
@@ -210,6 +226,93 @@ function handleDialogFlowAction(
   parameters
 ) {
   switch (action) {
+    case 'iphone_colors':
+      colors.readAllColors(function (allColors) {
+        let allColorsString = allColors.join(', ');
+        let reply = `IPhone XXX is available in ${allColorsString}, Which is your favourite?`;
+        sendTextMessage(sender, reply);
+      })
+      break;
+
+    case "iphone_colors.favourite":
+      colors.updateUserColor(parameters.fields['color'].stringValue, sender);
+      let reply = 'Oh, I like it too. I will remember that.'
+      sendTextMessage(sender, reply);
+      break;
+    
+    case 'buy.iphone':
+      colors.readUserColor(function(color) {
+        let reply;
+        if (color === ''){
+          reply = 'In what color would you like to have it ?'
+        } else {
+          reply = `Would you like it in your favourite color ${color} ?`
+        }
+        
+      })
+      sendTextMessage(sender, reply);
+      break;
+    case "get-current-weather":
+      if (
+        parameters.fields.hasOwnProperty("geo-city") &&
+        parameters.fields["geo-city"] !== ""
+      ) {
+        request(
+          {
+            url: "http://api.openweathermap.org/data/2.5/weather",
+            qs: {
+              app_id: config.WEATHER_API_KEY,
+              q: parameters.fields["geo-city"].stringValue
+            }
+          },
+          function(err, res, body) {
+            if (res.statusCode === 200) {
+              let weather = JSON.parse(body);
+              if (weather.hasOwnProperty("weather")) {
+                let reply = `${messages[0].text.text} ${weather[weather][0]["description"]}`;
+                sendTextMessage(sender, reply);
+              } else {
+                sendTextMessage(
+                  sender,
+                  "No weather forecast available for " +
+                    parameters.fields["geo-city"].stringValue
+                );
+              }
+            } else {
+              sendTextMessage(sender, "Weather forecast is not available.");
+            }
+          }
+        );
+      } else {
+        handleMessages(messages, sender);
+      }
+
+      break;
+    case "faq-delivery":
+      handleMessages(messages, sender);
+      sendTypingOn(sender);
+      setTimeout(() => {
+        let buttons = [
+          {
+            type: "web_url",
+            url: "https://www.myapple.com/track_order",
+            title: "Track my order"
+          },
+          {
+            type: "phone_number",
+            title: "Call us",
+            payload: "+918988989898"
+          },
+          {
+            type: "postback",
+            title: "Keep Chatting",
+            payload: "CHAT"
+          }
+        ];
+        sendButtonMessage(sender, "What would you like to do next ?", buttons);
+      }, 3000);
+
+      break;
     case "detailed_application":
       if (
         isDefined(contexts[0]) &&
@@ -251,6 +354,31 @@ function handleDialogFlowAction(
           phone_number != "" &&
           user_name != "" &&
           previous_job != "" &&
+          years_of_experience != ""
+        ) {
+          let replies = [
+            {
+              content_type: "text",
+              title: "Less than a year",
+              payload: "Less than a year."
+            },
+            {
+              content_type: "text",
+              title: "Less than 10 years",
+              payload: "Less than 10 years."
+            },
+            {
+              content_type: "text",
+              title: "More than 10 years",
+              payload: "More than 10 year."
+            }
+          ];
+
+          sendQuickReply(sender, messages[0].text.text[0], replies);
+        } else if (
+          phone_number != "" &&
+          user_name != "" &&
+          previous_job != "" &&
           years_of_experience != "" &&
           job_vacancy != ""
         ) {
@@ -259,7 +387,7 @@ function handleDialogFlowAction(
                         .<br /> Years of experience : ${years_of_experience}
                         .<br /> Phone Number: ${phone_number}`;
 
-        //   sendEmail("New job application", emailContent);
+          //   sendEmail("New job application", emailContent);
 
           handleMessages(message, sender);
         } else {
@@ -274,27 +402,27 @@ function handleDialogFlowAction(
 }
 
 function sendEmail(subject, content) {
-    console.log("Sending email");
-    var helper = require('sendgrid').mail;
+  console.log("Sending email");
+  var helper = require("sendgrid").mail;
 
-    var from_email = new helper.Email(config.EMAIL_FROM);
-    var to_email = new helper.Email(config.to_email);
-    var subject = subject;
-    var content = new helper.Content("text/html", content);
-    var mail = new helper.Mail(from_email, subject, to_email, content);
+  var from_email = new helper.Email(config.EMAIL_FROM);
+  var to_email = new helper.Email(config.to_email);
+  var subject = subject;
+  var content = new helper.Content("text/html", content);
+  var mail = new helper.Mail(from_email, subject, to_email, content);
 
-    var sg = require('sendgrid')(config.SENDGRID_API_KEY);
-    var request = sg.emptyRequest({
-        method: 'POST',
-        path: '/v3/mail/send',
-        body: mail.toJSON()
-    });
+  var sg = require("sendgrid")(config.SENDGRID_API_KEY);
+  var request = sg.emptyRequest({
+    method: "POST",
+    path: "/v3/mail/send",
+    body: mail.toJSON()
+  });
 
-    sg.API(request, function (err, res) {
-        console.log(res.statusCode);
-        console.log(res.body);
-        console.log(res.headers);        
-    });
+  sg.API(request, function(err, res) {
+    console.log(res.statusCode);
+    console.log(res.body);
+    console.log(res.headers);
+  });
 }
 
 function handleMessage(message, sender) {
@@ -802,11 +930,24 @@ function receivedPostback(event) {
   var recipientID = event.recipient.id;
   var timeOfPostback = event.timestamp;
 
+  setSessionAndUser(senderID);
   // The 'payload' param is a developer-defined field which is set in a postback
   // button for Structured Messages.
   var payload = event.postback.payload;
 
   switch (payload) {
+    case "GET_STARTED":
+      greetUserText(senderID);
+      break;
+    case "CHAT":
+      sendTextMessage(
+        senderID,
+        "I love chatting too. Do you have any other questions for me?"
+      );
+      break;
+    case "JOB_APPLY":
+      sendToDialogFlow(senderID, "job openings");
+      break;
     default:
       //unindentified payload
       sendTextMessage(
@@ -823,6 +964,38 @@ function receivedPostback(event) {
     payload,
     timeOfPostback
   );
+}
+
+async function greetUserText(senderID) {
+  let user = usersMap.get(senderID);
+
+  if (!user) {
+    await resolveAfterXSeconds(2);
+    user = usersMap.get(senderID);
+  }
+
+  if(user) {
+    sendTextMessage(
+      userId,
+      "Welcome " +
+        user.first_name +
+        "!" +
+        "I can answer frequently asked questions for you and i perform JOb interviews. What can i help you with?"
+    );
+  } else {
+    sendTextMessage(
+      userId,
+      "Welcome! I can answer frequently asked questions for you and i perform JOb interviews. What can i help you with?"
+    );
+  }
+}
+
+async function resolveAfterXSeconds(x){
+  return new Promise(resolve => {
+    setTimeout(() => {
+      resolve(x);
+    }, x * 1000);
+  })
 }
 
 /*
